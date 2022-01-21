@@ -34,7 +34,7 @@ from torch.autograd import Variable
 from tqdm import trange
 from transformers import GPT2Tokenizer
 from transformers.file_utils import cached_path
-from transformers.modeling_gpt2 import GPT2LMHeadModel
+from transformers import GPT2LMHeadModel
 
 from pplm_classification_head import ClassificationHead
 
@@ -196,7 +196,9 @@ def perturb_past(
         # Compute hidden using perturbed past
         perturbed_past = list(map(add, past, curr_perturbation))
         _, _, _, curr_length, _ = curr_perturbation[0].shape
-        all_logits, _, all_hidden = model(last, past=perturbed_past)
+        outputs = model(last, past_key_values=perturbed_past)
+        all_logits = outputs['logits']
+        all_hidden = outputs['hidden_states']
         hidden = all_hidden[-1]
         new_accumulated_hidden = accumulated_hidden + torch.sum(
             hidden,
@@ -225,10 +227,15 @@ def perturb_past(
             wte = model.resize_token_embeddings()
             for _ in range(horizon_length):
                 inputs_embeds = torch.matmul(curr_probs, wte.weight.data)
-                _, curr_unpert_past, curr_all_hidden = model(
-                    past=curr_unpert_past,
+
+                curr_outputs= model(
+                    past_key_values=curr_unpert_past,
                     inputs_embeds=inputs_embeds
                 )
+
+                curr_unpert_past = curr_outputs['past_key_values']
+                curr_all_hidden = curr_outputs['hidden_states']
+
                 curr_hidden = curr_all_hidden[-1]
                 new_accumulated_hidden = new_accumulated_hidden + torch.sum(
                     curr_hidden, dim=1)
@@ -450,6 +457,8 @@ def full_text_generation(
 
     else:
         raise Exception("Specify either a bag of words or a discriminator")
+    
+    print('pre into generate_text_pplm')
 
     unpert_gen_tok_text, _, _ = generate_text_pplm(
         model=model,
@@ -532,6 +541,7 @@ def generate_text_pplm(
         verbosity_level=REGULAR
 ):
     output_so_far = None
+    print('into generate_text_pplm')
     if context:
         context_t = torch.tensor(context, device=device, dtype=torch.long)
         while len(context_t.shape) < 2:
@@ -551,7 +561,7 @@ def generate_text_pplm(
         range_func = trange(length, ascii=True)
     else:
         range_func = range(length)
-
+    
     for i in range_func:
 
         # Get past/probs for current output, except for last word
@@ -561,9 +571,15 @@ def generate_text_pplm(
         if past is None and output_so_far is not None:
             last = output_so_far[:, -1:]
             if output_so_far.shape[1] > 1:
-                _, past, _ = model(output_so_far[:, :-1])
+                o = model(output_so_far[:, :-1])
+                past = o['past_key_values']
 
-        unpert_logits, unpert_past, unpert_all_hidden = model(output_so_far)
+        unpert_outputs = model(output_so_far)
+
+        unpert_logits = unpert_outputs['logits']
+        unpert_past = unpert_outputs['past_key_values']
+        unpert_all_hidden = unpert_outputs['hidden_states']
+
         unpert_last_hidden = unpert_all_hidden[-1]
 
         # check if we are abowe grad max length
@@ -607,7 +623,11 @@ def generate_text_pplm(
             else:
                 pert_past = past
 
-        pert_logits, past, pert_all_hidden = model(last, past=pert_past)
+        pert_outputs = model(last, past_key_values=pert_past)
+        pert_logits = pert_outputs['logits']
+        past = pert_outputs['past_key_values']
+        pert_all_hidden = pert_outputs['hidden_states']
+
         pert_logits = pert_logits[:, -1, :] / temperature  # + SMALL_CONST
         pert_probs = F.softmax(pert_logits, dim=-1)
 
@@ -762,7 +782,7 @@ def run_pplm_example(
     print()
 
     # generate unperturbed and perturbed texts
-
+    print("full_text_generation")
     # full_text_generation returns:
     # unpert_gen_tok_text, pert_gen_tok_texts, discrim_losses, losses_in_time
     unpert_gen_tok_text, pert_gen_tok_texts, _, _ = full_text_generation(
